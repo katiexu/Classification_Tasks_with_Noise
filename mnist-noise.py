@@ -6,6 +6,7 @@ import random
 import numpy as np
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import pickle
+from tqdm import tqdm
 
 # Qiskit imports
 from qiskit import QuantumCircuit, transpile
@@ -19,19 +20,16 @@ from qiskit.utils import algorithm_globals
 from torchquantum.dataset import MNIST
 
 
-class QFCModel(torch.nn.Module):
-    def __init__(self, n_qubits=4, use_noise_model=True):
+class Qiskit_Quantum_Model(torch.nn.Module):
+    def __init__(self, n_qubits=4, use_noise_model=True, backend_device='CPU'):
         super().__init__()
         self.n_qubits = n_qubits
         self.use_noise_model = use_noise_model
+        self.backend_device = backend_device
 
-        # Trainable quantum circuit parameters - keep original parameter count
-        self.u3_params = torch.nn.Parameter(torch.randn(4, 3) * 0.1)
-        self.cu3_params = torch.nn.Parameter(torch.randn(4, 3) * 0.1)
-
-        # Add simple trainable scaling factors
-        self.quantum_scale = torch.nn.Parameter(torch.tensor(1.0))
-        self.quantum_bias = torch.nn.Parameter(torch.tensor(0.0))
+        # Trainable quantum circuit parameters
+        self.u3_params = torch.nn.Parameter(torch.randn(n_qubits, 3) * 0.1, requires_grad=True)
+        self.cu3_params = torch.nn.Parameter(torch.randn(n_qubits, 3) * 0.1, requires_grad=True)
 
         # Setup Qiskit noise backend
         self.setup_qiskit_noise_backend()
@@ -59,68 +57,58 @@ class QFCModel(torch.nn.Module):
         self.system_model = FakeQuito()
 
     def create_quantum_circuit(self, x):
-        """Create quantum circuits"""
+        # Preprocess data: downsample, flatten and scale
         bsz = x.shape[0]
+        x = F.avg_pool2d(x, 6).view(bsz, 16)
+        x_scaled = x * np.pi
 
-        circuits = []
-        observables = []
-
-        # Preprocess data: downsample and flatten
-        x_downsampled = F.avg_pool2d(x, 6)
-        x_flat = x_downsampled.view(bsz, 16)
-
-        # Convert data to numpy array to avoid PyTorch tensor issues
-        x_numpy = x_flat.detach().cpu().numpy()
+        quantum_circuits = []
 
         for i in range(bsz):
             qc = QuantumCircuit(self.n_qubits)
 
-            # Part 1: RY encoding (16 RY gates) - using data directly
-            for j in range(16):
-                # Use data value directly as angle (no normalization)
-                angle = float(x_numpy[i, j] * np.pi)  # Scale to [0, π]
-                qc.ry(angle, j % self.n_qubits)
+            # Part 1: data encoder
+            gate_sequence = ['ry'] * self.n_qubits + ['rx'] * self.n_qubits + ['rz'] * self.n_qubits + [
+                'ry'] * self.n_qubits
 
-            # Part 2: U3 gates - using separated parameter values
+            for j, gate_type in enumerate(gate_sequence):
+                qubit_idx = j % self.n_qubits
+                angle = float(x_scaled[i, j].detach())
+
+                if gate_type == 'ry':
+                    qc.ry(angle, qubit_idx)
+                elif gate_type == 'rx':
+                    qc.rx(angle, qubit_idx)
+                elif gate_type == 'rz':
+                    qc.rz(angle, qubit_idx)
+
+            # Part 2: U3 gates (with trainable parameters)
             for qubit in range(self.n_qubits):
-                # Separate parameters and convert to Python float
-                theta = float(self.u3_params[qubit, 0].detach().item())
-                phi = float(self.u3_params[qubit, 1].detach().item())
-                lam = float(self.u3_params[qubit, 2].detach().item())
+                # Use detach() to avoid warnings
+                # theta = float(self.u3_params[qubit, 0].detach())
+                # phi = float(self.u3_params[qubit, 1].detach())
+                # lam = float(self.u3_params[qubit, 2].detach())
+                theta = float(self.u3_params[qubit, 0])
+                phi = float(self.u3_params[qubit, 1])
+                lam = float(self.u3_params[qubit, 2])
                 qc.u(theta, phi, lam, qubit)
 
-            # Part 3: CU3 gates
-            connections = [(0, 1), (1, 2), (2, 3), (3, 0)]
+            # Part 3: CU3 gates (with trainable parameters)
+            connections = [(i, (i + 1) % self.n_qubits) for i in range(self.n_qubits)]
 
             for idx, (control, target) in enumerate(connections):
-                theta = float(self.cu3_params[idx, 0].detach().item())
-                phi = float(self.cu3_params[idx, 1].detach().item())
-                lam = float(self.cu3_params[idx, 2].detach().item())
+                # Use detach() to avoid warnings
+                # theta = float(self.cu3_params[idx, 0].detach())
+                # phi = float(self.cu3_params[idx, 1].detach())
+                # lam = float(self.cu3_params[idx, 2].detach())
+                theta = float(self.cu3_params[idx, 0])
+                phi = float(self.cu3_params[idx, 1])
+                lam = float(self.cu3_params[idx, 2])
                 qc.cu(theta, phi, lam, 0, control, target)
 
-            circuits.append(qc)
+            quantum_circuits.append(qc)
 
-            # Create two observables for binary classification
-            # Observable 0: Measure qubit 0 with Z, others with I (for class 0)
-            observable_0 = SparsePauliOp("ZIII")  # Measure only qubit 0
-            # Observable 1: Measure qubit 1 with Z, others with I (for class 1)
-            observable_1 = SparsePauliOp("IZII")  # Measure only qubit 1
-
-            observables.append([observable_0, observable_1])
-
-        return circuits, observables
-
-    def transpile_circuits(self, circuits):
-        """Transpile circuits to adapt to backend"""
-        transpiled_circuits = []
-        for i, qc in enumerate(circuits):
-            try:
-                transpiled_qc = transpile(qc, backend=self.system_model, optimization_level=1)
-                transpiled_circuits.append(transpiled_qc)
-            except Exception as e:
-                print(f"Error transpiling circuit {i}: {e}")
-                transpiled_circuits.append(qc)
-        return transpiled_circuits
+        return quantum_circuits
 
     def adjust_observable_for_circuit(self, observable, circuit):
         """Adjust observable based on circuit qubit count"""
@@ -130,35 +118,31 @@ class QFCModel(torch.nn.Module):
         if circuit_qubits == observable_qubits:
             return observable
         elif circuit_qubits > observable_qubits:
-            # Add I at the end
             padding = "I" * (circuit_qubits - observable_qubits)
-            # Correctly extract Pauli strings
             pauli_strs = [str(pauli) for pauli in observable.paulis]
             adjusted_paulis = [pauli_str + padding for pauli_str in pauli_strs]
             return SparsePauliOp(adjusted_paulis)
         else:
-            # Truncate observable
             pauli_strs = [str(pauli) for pauli in observable.paulis]
             adjusted_paulis = [pauli_str[:circuit_qubits] for pauli_str in pauli_strs]
             return SparsePauliOp(adjusted_paulis)
 
-    def run_qiskit_circuits(self, circuits, observables_list):
-        """Run Qiskit circuits and return results"""
-        results_class0 = []
-        results_class1 = []
+    def run_qiskit_simulator(self, quantum_circuits, observable):
+        results = []
 
-        transpiled_circuits = self.transpile_circuits(circuits)
-
-        for i, (qc, observables) in enumerate(zip(transpiled_circuits, observables_list)):
+        for i, qc in enumerate(quantum_circuits):
             try:
-                # Adjust observables for circuit
-                observable_0 = self.adjust_observable_for_circuit(observables[0], qc)
-                observable_1 = self.adjust_observable_for_circuit(observables[1], qc)
+                transpiled_qc = transpile(qc, backend=self.system_model, optimization_level=1)
+            except Exception as e:
+                print(f"Error transpiling circuit {i}: {e}")
+                transpiled_qc = qc
 
-                # Create Estimator
+            try:
+                adjusted_observable = self.adjust_observable_for_circuit(observable, transpiled_qc)
+
                 backend_options = {
                     'method': 'statevector',
-                    'device': 'CPU',
+                    'device': self.backend_device,
                 }
                 if self.use_noise_model:
                     backend_options['noise_model'] = self.noise_model
@@ -172,123 +156,91 @@ class QFCModel(torch.nn.Module):
                     skip_transpilation=True
                 )
 
-                # Run for both observables
-                job_0 = estimator.run(qc, observable_0)
-                result_0 = job_0.result()
-
-                job_1 = estimator.run(qc, observable_1)
-                result_1 = job_1.result()
-
-                results_class0.append(result_0.values[0])
-                results_class1.append(result_1.values[0])
+                job = estimator.run(transpiled_qc, adjusted_observable)
+                result = job.result()
+                expectation_value = result.values[0]
+                results.append(expectation_value)
 
             except Exception as e:
                 print(f"Error running quantum circuit {i}: {e}")
-                # Use small random values instead of 0
-                results_class0.append(random.uniform(-0.05, 0.05))
-                results_class1.append(random.uniform(-0.05, 0.05))
+                results.append(0.0)
 
-        return (torch.tensor(results_class0, dtype=torch.float32),
-                torch.tensor(results_class1, dtype=torch.float32))
+        return torch.tensor(results, dtype=torch.float32, requires_grad=True)
+
 
     def forward(self, x):
-        """Forward propagation"""
-        bsz = x.shape[0]
         device = x.device
 
-        # Build circuits (parameters will be properly separated)
-        circuits, observables_list = self.create_quantum_circuit(x)
+        # Create quantum circuits
+        quantum_circuits = self.create_quantum_circuit(x)
 
-        # Run circuits - Key modification: use torch.no_grad() but create trainable connections
-        with torch.no_grad():  # Qiskit computation doesn't need gradients
-            results_class0, results_class1 = self.run_qiskit_circuits(circuits, observables_list)
+        # Create Pauli-Z observable
+        observable = SparsePauliOp.from_list([
+            ("ZIII", 1.0),
+            ("IZII", 1.0),
+            ("IIZI", 1.0),
+            ("IIIZ", 1.0)
+        ])
 
-        # Move results to correct device
-        results_class0 = results_class0.to(device)
-        results_class1 = results_class1.to(device)
+        # Run simulator
+        quantum_results = self.run_qiskit_simulator(quantum_circuits, observable)
+        quantum_results = quantum_results.to(device)
 
-        # Create quantum output tensor
-        quantum_output = torch.stack([results_class0, results_class1], dim=1)
+        # Ensure results require gradients
+        if not quantum_results.requires_grad:
+            quantum_results.requires_grad_(True)
 
-        # Key improvement: create trainable scaling and bias connections
-        # Use trainable parameters to scale quantum output, ensuring gradients can backpropagate to quantum parameters
-        scaled_quantum = quantum_output * self.quantum_scale + self.quantum_bias
+        # Convert single expectation value to binary classification output
+        # Method 1: Use sigmoid function to map expectation values to [0,1] range
+        # class0_prob = torch.sigmoid(quantum_results)
+        # class1_prob = 1 - class0_prob
+        # quantum_output = torch.stack([class0_prob, class1_prob], dim=1)
 
-        # Create trainable connections related to quantum parameters
-        # Use parameter information to enhance gradient flow
-        param_connection = (torch.sum(torch.abs(self.u3_params)) +
-                            torch.sum(torch.abs(self.cu3_params))) * 0.001
-
-        # Add parameter connection to output, ensuring gradients can backpropagate
-        enhanced_output = scaled_quantum * (1.0 + param_connection)
-
-        # Ensure correct output shape
-        if enhanced_output.size(1) < 2:
-            # If only 1 output, duplicate to create 2 outputs
-            enhanced_output = torch.cat([enhanced_output, enhanced_output], dim=1)
+        # Method 2: Directly use expectation values as logits, let softmax handle it
+        quantum_output = torch.stack([quantum_results, -quantum_results], dim=1)
 
         # Apply log softmax
-        output = F.log_softmax(enhanced_output, dim=1)
+        output = F.log_softmax(quantum_output, dim=1)
 
         return output
 
 
 def train(dataflow, model, device, optimizer):
-    """Improved training function with better stability"""
-    model.train()
-    total_loss = 0
-    batch_count = 0
+    pbar = tqdm(dataflow["train"], desc="Training", unit="batch")
 
-    # Use more conservative gradient accumulation
-    accumulation_steps = 2  # Reduce accumulation steps
-    optimizer.zero_grad()
-
-    for batch_idx, feed_dict in enumerate(dataflow["train"]):
+    total_loss = 0.0
+    for batch_idx, feed_dict in enumerate(pbar):
         inputs = feed_dict["image"].to(device)
         targets = feed_dict["digit"].to(device)
 
-        optimizer.zero_grad()
         outputs = model(inputs)
         loss = F.nll_loss(outputs, targets)
+        optimizer.zero_grad()
         loss.backward()
-
-        # More gentle gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-
         optimizer.step()
 
         total_loss += loss.item()
-        batch_count += 1
+        avg_loss = total_loss / (batch_idx + 1)
 
-        # More sparse printing to reduce output noise
-        if batch_idx % 10 == 0:
-            print(f'Batch {batch_idx}, Loss: {loss.item():.4f}')
-
-            # Print gradient information for monitoring
-            grad_norms = []
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    grad_norms.append(param.grad.norm().item())
-            if grad_norms:
-                avg_grad = np.mean(grad_norms)
-                max_grad = np.max(grad_norms)
-                print(f'Gradient - Avg: {avg_grad:.6f}, Max: {max_grad:.6f}')
-
-    return total_loss / batch_count if batch_count > 0 else 0
+        # Update progress bar description
+        pbar.set_postfix({
+            'Loss': f'{loss.item():.4f}',
+            'Avg Loss': f'{avg_loss:.4f}'
+        })
 
 
 def valid_test(dataflow, split, model, device):
-    """Validation and testing function"""
-    model.eval()
     target_all = []
     output_all = []
 
     with torch.no_grad():
-        for feed_dict in dataflow[split]:
+        pbar = tqdm(dataflow[split], desc=f"{split.capitalize()}ing", unit="batch")
+        for feed_dict in pbar:
             inputs = feed_dict["image"].to(device)
             targets = feed_dict["digit"].to(device)
 
             outputs = model(inputs)
+
             target_all.append(targets)
             output_all.append(outputs)
 
@@ -296,8 +248,10 @@ def valid_test(dataflow, split, model, device):
         output_all = torch.cat(output_all, dim=0)
 
     _, indices = output_all.topk(1, dim=1)
-    corrects = indices.eq(target_all.view(-1, 1)).sum().item()
-    accuracy = corrects / target_all.shape[0]
+    masks = indices.eq(target_all.view(-1, 1).expand_as(indices))
+    size = target_all.shape[0]
+    corrects = masks.sum().item()
+    accuracy = corrects / size
     loss = F.nll_loss(output_all, target_all).item()
 
     print(f"{split} set accuracy: {accuracy:.4f}")
@@ -308,12 +262,19 @@ def valid_test(dataflow, split, model, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=1, help="number of training epochs")
+    parser.add_argument("--epochs", type=int, default=5, help="number of training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="batch size")
-    parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
     parser.add_argument("--no-noise", action="store_false", dest="use_noise_model",
-                        help="disable noise model", default=True)   # Set "True" if use noise model; Set "False" if no noise
+                        help="disable noise model", default=False)  # Set 'True' if using backend noise
     parser.add_argument("--pdb", action="store_true", help="debug with pdb")
+
+    # Add new parameters
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="device for torch (cuda/cpu)")
+    parser.add_argument("--lr", type=float, default=5e-3, help="learning rate")
+    parser.add_argument("--weight-decay", type=float, default=1e-4, help="weight decay")
+    parser.add_argument("--backend-device", type=str, default="CPU", choices=["CPU", "GPU"],
+                        help="device for Qiskit backend (CPU/GPU)")
 
     args = parser.parse_args()
 
@@ -322,7 +283,7 @@ def main():
         pdb.set_trace()
 
     # Set random seeds
-    seed = 42  # Change random seed
+    seed = 42
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -332,7 +293,6 @@ def main():
         root="./mnist_data",
         train_valid_split_ratio=[0.9, 0.1],
         digits_of_interest=[3, 6],
-        n_test_samples=75,
     )
 
     dataflow = dict()
@@ -346,39 +306,44 @@ def main():
             pin_memory=False,
         )
 
-    # Use CUDA if available, otherwise use CPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device)
+
+    print(f"Training configuration:")
     print(f"Using device: {device}")
+    print(f"  Batch size: {args.batch_size}")
+    print(f"  Learning rate: {args.lr}")
+    print(f"  Weight decay: {args.weight_decay}")
+    print(f"  Use noise model: {args.use_noise_model}")
+    print(f"  Torch device: {args.device}")
+    print(f"  Qiskit backend device: {args.backend_device}")
 
-    model = QFCModel(n_qubits=4, use_noise_model=args.use_noise_model).to(device)
+    model = Qiskit_Quantum_Model(
+        n_qubits=4,
+        use_noise_model=args.use_noise_model,
+        backend_device=args.backend_device  # Pass backend device parameter
+    ).to(device)
 
-    # Use more stable optimizer configuration
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)  # Reduce weight decay
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)  # Add minimum learning rate
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    print("Starting training...")
-    best_loss = float('inf')
+    accuracy_list = []
+    loss_list = []
 
     for epoch in range(1, args.epochs + 1):
         print(f"\nEpoch {epoch}/{args.epochs}:")
-        avg_loss = train(dataflow, model, device, optimizer)
-        print(f"Epoch average loss: {avg_loss:.4f}")
 
-        # Validation
-        valid_accuracy, valid_loss = valid_test(dataflow, "valid", model, device)
+        # Training phase
+        train(dataflow, model, device, optimizer)
 
-        # Simple early stopping mechanism
-        if valid_loss < best_loss:
-            best_loss = valid_loss
-            print("New best validation loss, model is improving")
+        # Validation phase
+        accuracy, loss = valid_test(dataflow, "valid", model, device)
+        accuracy_list.append(accuracy)
+        loss_list.append(loss)
 
         scheduler.step()
 
-        # Print current learning rate
-        current_lr = scheduler.get_last_lr()[0]
-        print(f"Current learning rate: {current_lr:.6f}")
-
-    print("\nFinal test results:")
+    # Testing phase
+    print("\nFinal Testing:")
     valid_test(dataflow, "test", model, device)
 
 
