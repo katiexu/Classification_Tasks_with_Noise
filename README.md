@@ -8,4 +8,6 @@ pip install -r requirements.txt
 
 ## Run Code
 
-Run _mnist-noise.py_
+1) Run _get_backend_noise_model.py_ to generate .pkl noise model files.
+
+2) Run _mnist-noise.py_ to execute code.
