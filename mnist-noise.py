@@ -182,7 +182,7 @@ class Qiskit_Quantum_Model(torch.nn.Module):
             ("IIIZ", 1.0)
         ])
 
-        # Run simulator
+        # Run qiskit simulator
         quantum_results = self.run_qiskit_simulator(quantum_circuits, observable)
         quantum_results = quantum_results.to(device)
 
@@ -192,12 +192,12 @@ class Qiskit_Quantum_Model(torch.nn.Module):
 
         # Convert single expectation value to binary classification output
         # Method 1: Use sigmoid function to map expectation values to [0,1] range
-        # class0_prob = torch.sigmoid(quantum_results)
-        # class1_prob = 1 - class0_prob
-        # quantum_output = torch.stack([class0_prob, class1_prob], dim=1)
+        class0_prob = torch.sigmoid(quantum_results)
+        class1_prob = 1 - class0_prob
+        quantum_output = torch.stack([class0_prob, class1_prob], dim=1)
 
         # Method 2: Directly use expectation values as logits, let softmax handle it
-        quantum_output = torch.stack([quantum_results, -quantum_results], dim=1)
+        # quantum_output = torch.stack([quantum_results, -quantum_results], dim=1)
 
         # Apply log softmax
         output = F.log_softmax(quantum_output, dim=1)
@@ -222,7 +222,6 @@ def train(dataflow, model, device, optimizer):
         total_loss += loss.item()
         avg_loss = total_loss / (batch_idx + 1)
 
-        # Update progress bar description
         pbar.set_postfix({
             'Loss': f'{loss.item():.4f}',
             'Avg Loss': f'{avg_loss:.4f}'
