@@ -135,7 +135,7 @@ class Qiskit_Quantum_Model(torch.nn.Module):
     def run_qiskit_simulator(self, quantum_circuits, observables, is_training=True):
         results = []
 
-        # 根据是训练还是推断阶段决定是否使用噪声
+        # Decide whether to apply noise based on training or inference phase
         if is_training:
             use_noise = self.use_noise_model_train
             phase = "training"
@@ -143,7 +143,6 @@ class Qiskit_Quantum_Model(torch.nn.Module):
             use_noise = self.use_noise_model_infer
             phase = "inference"
 
-        # 只在第一个batch时打印，避免重复输出
         if not hasattr(self, f'_printed_{phase}'):
             print(f"Running quantum simulation for {phase} phase - Noise: {use_noise}")
             setattr(self, f'_printed_{phase}', True)
@@ -227,7 +226,6 @@ def train(dataflow, model, device, optimizer):
         inputs = feed_dict["image"].to(device)
         targets = feed_dict["digit"].to(device)
 
-        # 训练阶段传入 is_training=True
         outputs = model(inputs, is_training=True)
         loss = F.nll_loss(outputs, targets)
         optimizer.zero_grad()
@@ -257,7 +255,6 @@ def valid_test(dataflow, split, model, device):
             inputs = feed_dict["image"].to(device)
             targets = feed_dict["digit"].to(device)
 
-            # 推断阶段传入 is_training=False
             outputs = model(inputs, is_training=False)
 
             target_all.append(targets)
@@ -286,11 +283,10 @@ def main():
     parser.add_argument("--n-qubits", type=int, default=4,
                         help="number of qubits for quantum circuit")
 
-    # 替换原来的 --no-noise 参数为两个独立的参数
     parser.add_argument("--noise-train", action="store_true", default=False,
-                        help="enable noise model during training")
+                        help="enable noise model during training")      # Set 'True' to run training with noise
     parser.add_argument("--noise-infer", action="store_true", default=True,
-                        help="enable noise model during inference")
+                        help="enable noise model during inference")     # Set 'True' to run inference with noise
 
     parser.add_argument("--pdb", action="store_true", help="debug with pdb")
 
