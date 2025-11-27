@@ -8,10 +8,8 @@ pip install -r requirements.txt
 
 ## Run Code
 
-1) Run _get_backend_noise_model.py_ to generate .pkl noise model files.
-
-2) Run _mnist-noise-hybrid.py_ to execute code.
+Run _mnist-noise.py_ 
 - parser.add_argument("--noise-train", action="store_true", default=False,
-                        help="enable noise model during training")      # Set 'True' to run training with noise
+                        help="enable noise model during training")      # Set False if not using noise model in training
 - parser.add_argument("--noise-infer", action="store_true", default=True,
-                        help="enable noise model during inference")     # Set 'True' to run inference with noise
+                        help="enable noise model during inference")     # Set True if using noise model in valid and test
